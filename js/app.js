@@ -3127,7 +3127,6 @@ class CardForge {
             alert("同步过程中出错，请检查目录权限。");
         }
     }
-
     async exportAllToObsidian() {
         if (!this.obsidianPath) {
             alert("未绑定目录，无法导出！");
@@ -3141,7 +3140,7 @@ class CardForge {
         const obsAttachmentsDir = path.join(this.obsidianPath, 'attachments');
         try {
             if (!fs.existsSync(obsAttachmentsDir)) {
-                fs.mkdirSync(obsAttachmentsDir);
+                fs.mkdirSync(obsAttachmentsDir, { recursive: true });
                 console.log("[Sync] 已自动创建 Obsidian 附件目录");
             }
         } catch (e) {
@@ -3160,6 +3159,8 @@ class CardForge {
             for (const deckName in deckGroups) {
                 let mdContent = "";
                 const cards = deckGroups[deckName];
+
+                // 按照模板分组，保持笔记整洁
                 const templateGroups = {};
                 cards.forEach(c => {
                     if (!templateGroups[c.templateName]) templateGroups[c.templateName] = [];
@@ -3172,48 +3173,58 @@ class CardForge {
                     for (const card of templateGroups[tplName]) {
                         mdContent += `#### # ${card.name}\n`;
 
-                        // --- ★ 核心改进：图片物理迁移逻辑 ---
-                        const imgData = card.data['卡图区域'];
-                        if (imgData && imgData.imagePath) {
-                            const originalPath = imgData.imagePath;
-                            const fileName = path.basename(originalPath);
+                        // --- ★ 核心改进：动态扫描所有图片层 ★ ---
+                        // 遍历 card.data 中的每一个槽位，只要发现 imagePath 就执行迁移
+                        for (const label in card.data) {
+                            const slot = card.data[label];
 
-                            // 如果图片是在程序自带的保存目录下，执行“搬家”
-                            if (originalPath.includes('saved_data/images')) {
-                                const sourceFullPath = path.join(process.cwd(), originalPath);
+                            if (slot && slot.imagePath) {
+                                const originalPath = slot.imagePath;
+                                const fileName = path.basename(originalPath);
+
+                                // 构造源文件完整路径 (处理相对路径)
+                                const sourceFullPath = path.isAbsolute(originalPath)
+                                    ? originalPath
+                                    : path.join(process.cwd(), originalPath);
+
                                 const targetFullPath = path.join(obsAttachmentsDir, fileName);
 
                                 try {
-                                    // 只有当 Obsidian 目录里还没有这张图时才复制，避免重复IO
-                                    if (fs.existsSync(sourceFullPath) && !fs.existsSync(targetFullPath)) {
+                                    // 如果图片存在且附件库里还没有，就执行“物理搬家”
+                                    if (fs.existsSync(sourceFullPath)) {
+                                        // 注意：这里去掉了 !fs.existsSync(targetFullPath) 的判断
+                                        // 这样如果图片内容变了但文件名没变，也能强制覆盖更新
                                         fs.copyFileSync(sourceFullPath, targetFullPath);
-                                        console.log(`[Sync] 已将图片迁移至 Obsidian: ${fileName}`);
+                                        console.log(`[Sync] 图片已同步至 Obsidian: ${fileName}`);
                                     }
                                 } catch (copyErr) {
-                                    console.error("图片迁移失败:", copyErr);
+                                    console.error(`[Sync] 图片迁移失败 (${fileName}):`, copyErr);
+                                }
+
+                                // 在 Markdown 中写入对应的引用链接
+                                mdContent += `![[${fileName}]]\n`;
+
+                                // 如果是坐标信息，一并写入
+                                if (slot.scale !== undefined) {
+                                    const s = Math.round((slot.scale || 1.0) * 100);
+                                    const x = Math.round(slot.x || 0);
+                                    const y = Math.round(slot.y || 0);
+                                    mdContent += `${label}位置：${s} ${x} ${y}\n`;
                                 }
                             }
-
-                            // 写入 MD
-                            let imgStr = originalPath.startsWith('http')
-                                ? `![](${originalPath})`
-                                : `![[${fileName}]]`; // 统一转为 Obsidian 内部链接格式
-                            mdContent += `${imgStr}\n`;
-
-                            const s = Math.round((imgData.scale || 1.0) * 100);
-                            const x = Math.round(imgData.x || 0);
-                            const y = Math.round(imgData.y || 0);
-                            mdContent += `卡图位置：${s} ${x} ${y}\n`;
                         }
 
-                        // --- 属性处理 ---
+                        // --- 属性处理 (文本层) ---
                         const tplDef = this.templateLibrary[card.templateName];
                         const elements = tplDef ? (Array.isArray(tplDef) ? tplDef : tplDef.elements) : [];
 
                         for (const label in card.data) {
-                            if (label === '卡图区域' || label === '卡名') continue;
+                            // 排除已经处理过的图片层和卡名
+                            if (card.data[label].imagePath || label === '卡名') continue;
+
                             const val = card.data[label].text || "";
                             const elDef = elements.find(e => e.label === label);
+
                             if ((elDef && elDef.multiline) || val.includes('\n')) {
                                 mdContent += `${label}：{\n${val}\n}\n`;
                             } else {
@@ -3227,10 +3238,10 @@ class CardForge {
                 const safeFileName = deckName.replace(/[\\\/:*?"<>|]/g, '_') + '.md';
                 fs.writeFileSync(path.join(this.obsidianPath, safeFileName), mdContent, 'utf-8');
             }
-            alert(`保存成功！\n程序内的图片已自动同步到 Obsidian 附件库。`);
+            alert(`同步完成！\n所有卡组已更新，图片已存入 attachments 目录。`);
         } catch (err) {
-            console.error("导出失败:", err);
-            alert("导出失败，请检查文件权限。");
+            console.error("同步失败:", err);
+            alert("导出失败，详细错误见控制台。");
         }
     }
 }
