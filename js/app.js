@@ -981,27 +981,28 @@ class CardForge {
 
 
     deleteTemplateFromLibrary() {
-
         const selector = document.getElementById('designerTemplateSelector');
-
         const name = selector.value;
-
         if (!name) { alert("请先从下拉菜单中选择一个要删除的模板。"); return; }
 
         if (confirm(`确定要永久删除模板 "${name}" 吗？`)) {
-
             delete this.templateLibrary[name];
-
             this.saveStorage('cardForge_templates', this.templateLibrary);
-
             this.updateDesignerTemplateSelectorUI();
 
-            if (this.currentTemplateName === name) { this.currentTemplateName = "未命名模板"; this.updateTemplateSettingsUI(); }
+            // ★ 核心修复：如果删除的是当前正在编辑的模板，清空画布和 UI
+            if (this.currentTemplateName === name) {
+                this.template = [];            // 清空图层数据
+                this.selectedId = null;         // 取消选中
+                this.currentTemplateName = "未命名模板";
 
+                this.updateTemplateSettingsUI(); // 重置名字和宽高的输入框
+                this.updateLayerList();          // 清空左侧图层列表
+                this.updatePropEditor();         // 隐藏属性面板
+                this.render();                   // 刷出一片白茫茫的画布
+            }
             alert("模板已删除。");
-
         }
-
     }
 
 
@@ -1314,23 +1315,27 @@ class CardForge {
             // 3. 保存更新后的库 (这一步至关重要)
             this.saveStorage('cardForge_cards', this.cardLibrary);
 
-            // 4. 刷新 UI
-            this.decks = this.extractDecks();
-            this.updateDeckUI();
-            this.updateCardSelectorUI();
 
-            this.cardData = {};
-            this.currentCardName = "";
-            this.currentDeck = "";
-            document.getElementById('cardNameInput').value = "";
-            document.getElementById('cardDeckInput').value = "";
+            // ★ 核心修复：如果删除的是当前正在编辑的那张卡，彻底重置状态
+            if (this.currentCardName === name) {
+                this.template = [];        // 彻底清空画布上的模板结构
+                this.cardData = {};        // 清空数据槽位
+                this.selectedId = null;    // 清除选中框
+                this.currentCardName = "";
+                this.currentDeck = "";
+                this.isCardEditing = false; // 标记为非编辑状态
 
-            this.isCardEditing = false;
-            this.isDeckDirty = true;
+                // 同步清空卡牌编辑页面的输入框
+                document.getElementById('cardNameInput').value = "";
+                document.getElementById('cardDeckInput').value = "";
+                document.getElementById('cardSelector').value = "";
 
-            this.render();
-            this.updateCardInputs();
+                // 关键：触发这个方法会显示那个“请新建或加载卡牌”的幽灵提示图
+                this.updateCardInputs();
+                this.render(); // 刷新画布为全空
+            }
 
+            this.isDeckDirty = true; // 标记卡组视图需要刷新
             alert("卡牌已删除");
         }
     }
@@ -2514,245 +2519,172 @@ class CardForge {
     // --- 交互事件 (增强拖拽调整大小) ---
 
     setupEvents() {
-
         const layer = this.interactionLayer;
-
-        let isDragging = false;
-
-        let isResizing = false;
-
-        let startX, startY;
-
-        let initialElX, initialElY, initialElW, initialElH;
-
-        let initialImgX, initialImgY;
-
-        const handleSize = 8;
-
-
-
-        // --- 修复：坐标计算需要除以当前的缩放倍率 ---
-
-        const getPos = (e) => {
-
-            const rect = layer.getBoundingClientRect();
-
-            return {
-
-                x: (e.clientX - rect.left) / this.viewZoom,
-
-                y: (e.clientY - rect.top) / this.viewZoom
-
-            };
-
-        };
-
-
-
-        // 鼠标滚轮缩放
-
         const workspace = document.getElementById('workspaceContainer');
 
+        // ★ 缩放逻辑 (放在这里)
         workspace.addEventListener('wheel', (e) => {
-
-            if (this.mode === 'deck') return; // allow deck overview to scroll normally
-
+            if (this.mode === 'deck') return;
             e.preventDefault();
-
             const delta = -Math.sign(e.deltaY) * 0.1;
-
             this.viewZoom = Math.min(Math.max(0.2, this.viewZoom + delta), 3.0);
-
             this.updateCanvasZoom();
+        }, { passive: false });
 
-        });
+        // --- 拖拽状态变量 ---
+        let isDragging = false;
+        let isResizing = false;
+        let dragPending = false;
 
+        let startX, startY; // 鼠标按下的初始位置
+        let initialElX, initialElY, initialElW, initialElH; // 元素的初始位置/尺寸
+        let initialImgX, initialImgY; // 用户图片的偏移初始值
 
+        const handleSize = 20; // 缩放手柄感应区
+        const dragThreshold = 3; // 拖拽阈值（位移超过3px才认为是在拖拽）
 
+        // 获取校正后的鼠标坐标 (考虑 Canvas 缩放)
+        const getPos = (e) => {
+            const rect = layer.getBoundingClientRect();
+            return {
+                x: (e.clientX - rect.left) / this.viewZoom,
+                y: (e.clientY - rect.top) / this.viewZoom
+            };
+        };
+
+        // --- 1. 鼠标按下 ---
         layer.addEventListener('mousedown', (e) => {
             const pos = getPos(e);
-            startX = pos.x; startY = pos.y;
+            startX = pos.x;
+            startY = pos.y;
 
             if (this.mode === 'template') {
-                // --- ★ 第一优先级：判定是否点中了“当前已选元素”的缩放方块 ---
+                // A. 判定是否点击了“缩放手柄”
                 if (this.selectedId) {
                     const el = this.template.find(e => e.id === this.selectedId);
-                    if (el &&
-                        pos.x >= el.x + el.w - handleSize && pos.x <= el.x + el.w &&
-                        pos.y >= el.y + el.h - handleSize && pos.y <= el.y + el.h) {
-
+                    if (el && pos.x >= el.x + el.w - handleSize && pos.x <= el.x + el.w + 5 &&
+                        pos.y >= el.y + el.h - handleSize && pos.y <= el.y + el.h + 5) {
                         isResizing = true;
                         initialElW = el.w;
                         initialElH = el.h;
-                        return; // ★ 极其重要：直接返回，不触发下面的拖拽逻辑
+                        return; // 缩放逻辑结束
                     }
                 }
 
-                // --- ★ 第二优先级：判定拖拽或点击新元素 ---
+                // B. 判定点击了哪个图层
                 let hit = null;
-
-                // 1. 优先判定当前已选中的元素（解决你刚才提到的图层穿透问题）
+                // 优先检查当前已选中的图层
                 if (this.selectedId) {
-                    const currentEl = this.template.find(el => el.id === this.selectedId);
-                    if (currentEl &&
-                        pos.x >= currentEl.x && pos.x <= currentEl.x + currentEl.w &&
-                        pos.y >= currentEl.y && pos.y <= currentEl.y + currentEl.h) {
-                        hit = currentEl;
+                    const cur = this.template.find(el => el.id === this.selectedId);
+                    if (cur && pos.x >= cur.x && pos.x <= cur.x + cur.w && pos.y >= cur.y && pos.y <= cur.y + cur.h) {
+                        hit = cur;
                     }
                 }
-
-                // 2. 如果没点中已选元素，再按层级找最上层的
+                // 如果没点中已选的，寻找最上层的新图层
                 if (!hit) {
                     hit = [...this.template].reverse().find(el =>
-                        pos.x >= el.x && pos.x <= el.x + el.w &&
-                        pos.y >= el.y && pos.y <= el.y + el.h
+                        pos.x >= el.x && pos.x <= el.x + el.w && pos.y >= el.y && pos.y <= el.y + el.h
                     );
                 }
 
                 if (hit) {
-                    this.selectElement(hit.id);
-                    isDragging = true;
-                    initialElX = hit.x;
-                    initialElY = hit.y;
-                    layer.style.cursor = 'move';
+                    if (this.selectedId === hit.id) {
+                        // ★ 核心逻辑：如果是已选中的图层按下，准备拖拽
+                        dragPending = true;
+                        initialElX = hit.x;
+                        initialElY = hit.y;
+                    } else {
+                        // ★ 核心逻辑：如果是未选中的图层点击，仅切换选中
+                        this.selectElement(hit.id);
+                        dragPending = false;
+                    }
                 } else {
+                    // 点击空白处取消选中
                     this.selectedId = null;
+                    dragPending = false;
                     this.updateUI();
                     this.render();
                 }
-            } else {
-                // --- 卡牌模式 (Editor) 保持不变 ---
+            }
+            else if (this.mode === 'card') {
+                // 卡牌模式下的图片拖拽逻辑
                 const hit = [...this.template].reverse().find(el =>
                     el.type === 'user-image' &&
-                    pos.x >= el.x && pos.x <= el.x + el.w &&
-                    pos.y >= el.y && pos.y <= el.y + el.h
+                    pos.x >= el.x && pos.x <= el.x + el.w && pos.y >= el.y && pos.y <= el.y + el.h
                 );
-
-                if (hit && this.cardData[hit.label] && this.cardData[hit.label].img) {
-                    this.selectedId = hit.id;
-                    isDragging = true;
-                    initialImgX = this.cardData[hit.label].x || 0;
-                    initialImgY = this.cardData[hit.label].y || 0;
-                    layer.style.cursor = 'move';
+                if (hit && this.cardData[hit.label]?.img) {
+                    if (this.selectedId === hit.id) {
+                        dragPending = true;
+                        initialImgX = this.cardData[hit.label].x || 0;
+                        initialImgY = this.cardData[hit.label].y || 0;
+                    } else {
+                        this.selectElement(hit.id);
+                        dragPending = false;
+                    }
                 }
             }
         });
 
+        // --- 2. 鼠标移动 ---
         window.addEventListener('mousemove', (e) => {
             const pos = getPos(e);
-            const dx = pos.x - startX; const dy = pos.y - startY;
+            const dx = pos.x - startX;
+            const dy = pos.y - startY;
 
-            if (isResizing) {
+            // 处理缩放
+            if (isResizing && this.selectedId) {
                 const el = this.template.find(e => e.id === this.selectedId);
-                if (el) { el.w = Math.max(10, initialElW + dx); el.h = Math.max(10, initialElH + dy); this.updatePropEditor(); this.render(); }
+                if (el) {
+                    el.w = Math.max(10, initialElW + dx);
+                    el.h = Math.max(10, initialElH + dy);
+                    this.updatePropEditor();
+                    this.render();
+                }
                 return;
             }
 
-            if (!isDragging) return;
-
-            if (this.mode === 'template' && this.selectedId) {
-                const el = this.template.find(e => e.id === this.selectedId);
-                if (el) { el.x = initialElX + dx; el.y = initialElY + dy; this.updatePropEditor(); this.render(); }
+            // 处理拖拽检测：如果有 dragPending 且 移动距离超过阈值，开启 isDragging
+            if (dragPending && !isDragging) {
+                if (Math.abs(dx) > dragThreshold || Math.abs(dy) > dragThreshold) {
+                    isDragging = true;
+                    layer.style.cursor = 'move';
+                }
             }
-            else if (this.mode === 'card' && this.selectedId) {
-                // ★★★ 卡牌模式：修改点 2 ★★★
-                // 因为 selectedId 存的是模板元素的 id，我们需要先找到那个元素拿到它的 label
-                const el = this.template.find(e => e.id === this.selectedId);
-                if (el && this.cardData[el.label]) {
-                    const data = this.cardData[el.label];
-                    data.x = initialImgX + dx;
-                    data.y = initialImgY + dy;
-                    this.render();
+
+            // 执行拖拽位移
+            if (isDragging && this.selectedId) {
+                if (this.mode === 'template') {
+                    const el = this.template.find(e => e.id === this.selectedId);
+                    if (el) {
+                        el.x = initialElX + dx;
+                        el.y = initialElY + dy;
+                        this.updatePropEditor();
+                        this.render();
+                    }
+                } else if (this.mode === 'card') {
+                    const el = this.template.find(e => e.id === this.selectedId);
+                    if (el && this.cardData[el.label]) {
+                        this.cardData[el.label].x = initialImgX + dx;
+                        this.cardData[el.label].y = initialImgY + dy;
+                        this.render();
+                    }
                 }
             }
         });
 
-        window.addEventListener('mouseup', () => { isDragging = false; isResizing = false; layer.style.cursor = 'default'; });
+        // --- 3. 鼠标松开 ---
+        window.addEventListener('mouseup', () => {
+            isDragging = false;
+            isResizing = false;
+            dragPending = false;
+            layer.style.cursor = 'default';
+        });
 
-
-
+        // --- 4. 按钮绑定 (保持原有不变) ---
         document.getElementById('btnModeTemplate').onclick = () => this.setMode('template');
-
         document.getElementById('btnModeCard').onclick = () => this.setMode('card');
-
         document.getElementById('btnModeDeck').onclick = () => this.setMode('deck');
-
-
-
         document.getElementById('btnGlobalExport').onclick = () => this.exportCurrentCardImage();
-
-
-
-
-        document.getElementById('fileTemplate').onchange = (e) => {
-
-            const file = e.target.files[0]; if (!file) return;
-
-            const reader = new FileReader();
-
-            reader.onload = (evt) => {
-
-                try {
-
-                    const data = JSON.parse(evt.target.result);
-
-                    if (!Array.isArray(data) && data.elements) {
-
-                        this.template = data.elements; this.currentTemplateName = data.name || "导入模板"; this.width = data.width || 400; this.height = data.height || 600;
-
-                    } else { this.template = data; }
-
-                    this.resizeCanvas(); this.updateTemplateSettingsUI();
-
-                    this.template.forEach(el => { if (el.type === 'static-image' && el._srcData) { const img = new Image(); img.onload = () => { el.src = img; this.render(); }; img.src = el._srcData; } });
-
-                    this.selectedId = null; this.updateUI(); this.render(); alert('模板导入成功！');
-
-                } catch (err) { alert('模板文件格式错误'); }
-
-            }; reader.readAsText(file);
-
-        };
-
-
-
-        document.getElementById('fileCard').onchange = (e) => {
-
-            const file = e.target.files[0]; if (!file) return;
-
-            const reader = new FileReader();
-
-            reader.onload = (evt) => {
-
-                try {
-
-                    const data = JSON.parse(evt.target.result);
-
-                    if (data.templateName && this.templateLibrary[data.templateName]) {
-
-                        this.loadTemplateFromLibrary(data.templateName);
-
-                    } else if (data.templateName) { alert(`提示：该卡牌数据使用了模板 "${data.templateName}"，但您的库中没有找到该模板。`); }
-
-                    const cardContent = data.data || data;
-
-                    for (let id in cardContent) {
-
-                        if (!this.cardData[id]) this.cardData[id] = {};
-
-                        Object.assign(this.cardData[id], cardContent[id]);
-
-                        if (this.cardData[id]._imgSrc) { const img = new Image(); img.onload = () => { this.cardData[id].img = img; this.render(); }; img.src = this.cardData[id]._imgSrc; }
-
-                    }
-
-                    this.updateUI(); this.render(); alert('卡牌数据导入成功！');
-
-                } catch (err) { console.error(err); alert('数据文件格式错误'); }
-
-            }; reader.readAsText(file);
-
-        };
     }
 
     /**
