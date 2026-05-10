@@ -45,12 +45,27 @@ class CardForge {
 
     async initApp() {
         await this.storage.init();
-        const config = this.storage.loadConfig();
-        this.obsidianPath = config.obsidianPath || null;
+        const config = this.storage.loadConfig() || {};
 
-        // 核心：等待数据加载完成后再更新 UI
-        this.templateLibrary = this.storage.load('cardForge_templates');
-        this.cardLibrary = this.storage.load('cardForge_cards');
+        // ==========================================
+        // ★ 新增：仓库管理初始化
+        // ==========================================
+        this.workspaces = config.workspaces || [{ id: 'default', name: '默认本地缓存', path: '' }];
+        this.currentWorkspace = config.currentWorkspace || 'default';
+
+        // 如果找不到当前配置的仓库，回退到默认
+        if (!this.workspaces.find(w => w.id === this.currentWorkspace)) {
+            this.currentWorkspace = 'default';
+        }
+
+        // 把当前仓库路径传递给底层存储适配器
+        this.applyWorkspaceToStorage();
+        this.updateWorkspaceUI();
+        // ==========================================
+
+        // 此时 load 出来的数据，已经是该仓库下的独有数据了
+        this.templateLibrary = this.storage.load('cardForge_templates') || {};
+        this.cardLibrary = this.storage.load('cardForge_cards') || {};
         this.decks = this.extractDecks();
         this.normalizeAllDeckOrders();
 
@@ -60,7 +75,6 @@ class CardForge {
         this.setupEvents();
         this.render();
 
-        // ★ 顺序很重要：先刷新卡组，再刷新卡牌选择器，最后刷新模板选择器
         this.updateDeckUI();
         this.updateCardSelectorUI();
         this.updateDesignerTemplateSelectorUI();
@@ -68,7 +82,112 @@ class CardForge {
         this.bindSettings();
         this.updateUI();
 
-        console.log("CardForge 已就绪，数据已同步至 UI。");
+        console.log(`[Workspace] 已加载仓库: ${this.currentWorkspace}`);
+    }
+
+    // --- ★ 仓库 (Workspace) 管理功能 ★ ---
+
+    updateWorkspaceUI() {
+        const selector = document.getElementById('workspaceSelector');
+        if (!selector) return;
+        selector.innerHTML = '';
+        this.workspaces.forEach(ws => {
+            const opt = document.createElement('option');
+            opt.value = ws.id;
+            opt.innerText = ws.name;
+            if (ws.id === this.currentWorkspace) opt.selected = true;
+            selector.appendChild(opt);
+        });
+    }
+
+    applyWorkspaceToStorage() {
+        const ws = this.workspaces.find(w => w.id === this.currentWorkspace);
+        if (ws) {
+            // 通知 StorageAdapter 切换根目录
+            if (typeof this.storage.setRootPath === 'function') {
+                this.storage.setRootPath(ws.path);
+            }
+            // 为了兼容之前的 Obsidian 同步功能，你可以直接把 ObsidianPath 指向仓库路径
+            // 这样当前仓库的卡牌就会直接导出为 MD 到该仓库下
+            this.obsidianPath = ws.path;
+        }
+    }
+
+    async bindNewWorkspace() {
+        const chooser = document.createElement('input');
+        chooser.type = 'file';
+        chooser.setAttribute('nwdirectory', ''); // 唤起文件夹选择
+
+        chooser.onchange = (e) => {
+            const path = e.target.files[0].path;
+            let name = prompt(`已选择目录：\n${path}\n\n请为新仓库/游戏项目命名:`, "新游戏项目");
+            if (!name) return; // 取消操作
+
+            const newId = 'ws_' + Date.now();
+            this.workspaces.push({ id: newId, name: name, path: path });
+
+            // 保存全局配置并立即切换
+            this.switchWorkspace(newId);
+        };
+        chooser.click();
+    }
+
+    async switchWorkspace(wsId) {
+        if (this.currentWorkspace === wsId) return;
+
+        if (this.isCardEditing || this.template.length > 0) {
+            if (!confirm("切换仓库会丢失当前未保存的画布修改，确定继续吗？")) {
+                this.updateWorkspaceUI(); // 恢复下拉菜单选择
+                return;
+            }
+        }
+
+        this.currentWorkspace = wsId;
+
+        // 1. 保存全局配置 (记录你的仓库列表和最后打开的仓库)
+        this.storage.saveConfig({
+            workspaces: this.workspaces,
+            currentWorkspace: this.currentWorkspace
+        });
+
+        // 2. 切换底层存储路径
+        this.applyWorkspaceToStorage();
+
+        // 3. 彻底清空当前内存中的视图状态
+        this.template = [];
+        this.cardData = {};
+        this.selectedId = null;
+        this.currentTemplateName = "未命名模板";
+        this.currentCardName = "";
+        this.currentDeck = "默认卡组";
+        this.isCardEditing = false;
+        this.draggedCardName = null;
+
+        // 4. 重新读取新仓库的 JSON 库
+        this.templateLibrary = this.storage.load('cardForge_templates') || {};
+        this.cardLibrary = this.storage.load('cardForge_cards') || {};
+        this.decks = this.extractDecks();
+
+        // 5. 强制全量刷新 UI
+        this.updateWorkspaceUI();
+        this.updateDesignerTemplateSelectorUI();
+        this.updateCardSelectorUI();
+        this.updateDeckUI();
+        this.isDeckDirty = true;
+        this.updateDeckGalleryUI();
+        this.updateLayerList();
+        this.updatePropEditor();
+        this.updateCardInputs();
+
+        document.getElementById('tplNameInput').value = "";
+        document.getElementById('cardNameInput').value = "";
+        document.getElementById('cardDeckInput').value = "";
+
+        this.resizeCanvas();
+        this.render();
+
+        const wsName = this.workspaces.find(w => w.id === wsId)?.name || wsId;
+        alert(`已切换到仓库: [${wsName}]\n所有模板、卡牌和图片资源已隔离。`);
     }
 
     extractDecks() {

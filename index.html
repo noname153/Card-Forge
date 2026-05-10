@@ -31,13 +31,23 @@
     <div
         class="h-14 bg-gray-900 border-b border-gray-800 flex items-center justify-between px-6 z-20 shadow-md relative">
 
-        <div class="flex items-center gap-2">
+        <div class="p-2 bg-gray-900 border-b border-gray-800 flex items-center gap-1.5 flex-shrink-0 z-50">
 
-            <i class="fa-solid fa-hammer text-blue-500"></i>
+            <span id="modeBadge"
+                class="text-[10px] px-1.5 py-0.5 rounded text-white bg-blue-600 shadow-sm flex-shrink-0 cursor-help"
+                title="当前存储模式">
+                硬盘
+            </span>
 
-            <h1 class="font-bold text-lg tracking-wider">卡牌铸造厂 <span
-                    class="text-xs bg-gray-700 px-1 rounded text-gray-300">Pro</span></h1>
+            <select id="workspaceSelector" onchange="app.switchWorkspace(this.value)"
+                class="flex-1 bg-gray-800 text-blue-400 text-xs font-bold p-1.5 rounded border border-gray-700 outline-none cursor-pointer focus:border-blue-500 focus:bg-gray-900 transition-colors truncate shadow-inner">
+            </select>
 
+            <button onclick="app.bindNewWorkspace()"
+                class="bg-gray-700 hover:bg-blue-600 text-gray-200 hover:text-white text-[10px] px-2 py-1.5 rounded border border-gray-600 hover:border-blue-500 transition-all shadow-sm flex-shrink-0"
+                title="新建或绑定本地文件夹作为新仓库">
+                <i class="fa-solid fa-folder-plus"></i> 绑定
+            </button>
         </div>
 
 
@@ -130,8 +140,6 @@
 
         <div id="leftPanel" class="bg-gray-900 border-r border-gray-800 flex flex-col shadow-xl z-10"
             style="width: 384px; min-width: 250px; max-width: 600px;">
-
-
 
             <!-- A. 模板编辑面板 -->
 
