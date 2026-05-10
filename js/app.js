@@ -1574,9 +1574,10 @@ class CardForge {
 
     addElement(type) {
 
+        // 在 addElement 方法开头
         const id = generateId();
-
-        const baseProps = { id, type, x: 20, y: 20, w: 100, h: 100 };
+        // ★ 新增 alwaysShowInput: true 属性
+        const baseProps = { id, type, x: 20, y: 20, w: 100, h: 100, alwaysShowInput: true };
 
         if (type === 'static-image') {
 
@@ -1773,8 +1774,24 @@ class CardForge {
         ctx.scale(sf, sf);
 
         this.template.forEach(el => {
-            // 如果检查不通过，就不画它
-            if (this.checkVisibility(el)) {
+            // 1. 计算当前元素的可见性
+            const isVisible = this.checkVisibility(el);
+
+            // 2. ★ 新增：动态控制卡牌编辑面板中的输入框显示/隐藏
+            if (this.mode === 'card') {
+                const wrapper = document.getElementById(`input-wrapper-${el.id}`);
+                if (wrapper) {
+                    // 如果不勾选“始终显示”，且条件不满足，则隐藏对应的编辑框
+                    if (el.alwaysShowInput === false && !isVisible) {
+                        wrapper.classList.add('hidden');
+                    } else {
+                        wrapper.classList.remove('hidden');
+                    }
+                }
+            }
+
+            // 3. 如果检查通过，正常绘制图层
+            if (isVisible) {
                 this.renderElement(ctx, el);
             }
         });
@@ -2052,65 +2069,77 @@ class CardForge {
             this.render();
         };
         conditionContainer.appendChild(targetSelect);
+
         // ★ 只有选择了目标，才显示后面的逻辑设置
-        if (el.bindTargetId && el.bindTargetId !== 'manual-hide') {
-            const logicRow = document.createElement('div');
-            logicRow.className = "flex gap-1";
-
-            // 2. 【操作符】选择器
-            const opSelect = document.createElement('select');
-
-            // 判断是否为不需要输入“值”的模式
-            const isNoValueMode = (el.bindTargetOperator === 'not-empty');
-
-            opSelect.className = isNoValueMode
-                ? "w-full p-1 rounded bg-gray-900 border border-gray-700 text-xs"
-                : "w-24 p-1 rounded bg-gray-900 border border-gray-700 text-xs"; // 稍微加宽一点以容纳长文本
-
-            // 定义所有可用的操作符
-            const options = [
-                { v: '==', t: "等于" },
-                { v: '!=', t: "不等于" },
-                { v: '>', t: "大于 (>)" },
-                { v: '<', t: "小于 (<)" },
-                { v: '>=', t: "大于等于 (>=)" },
-                { v: '<=', t: "小于等于 (<=)" },
-                { v: 'not-empty', t: "不为空 (有字显)" }
-            ];
-
-            options.forEach(opt => {
-                const o = document.createElement('option');
-                o.value = opt.v;
-                o.text = opt.t;
-                if ((el.bindTargetOperator || '==') === opt.v) o.selected = true;
-                opSelect.appendChild(o);
+        if (el.bindTargetId) {
+            // 1. 新增：是否在面板中始终显示的开关
+            // 兼容旧数据，如果是 undefined 则默认为 true
+            const isAlwaysShow = el.alwaysShowInput !== false;
+            this.createCheckboxProp(conditionContainer, '条件不满足时，仍显示编辑栏', isAlwaysShow, v => {
+                el.alwaysShowInput = v;
             });
 
-            opSelect.onchange = (e) => {
-                el.bindTargetOperator = e.target.value;
-                // 改变操作符后立即刷新面板，决定是否显示/隐藏旁边的输入框
-                this.updatePropEditor();
-                this.render();
-            };
-            logicRow.appendChild(opSelect);
+            // 2. 原有的逻辑操作符选项（手动隐藏模式不需要这些操作符）
+            if (el.bindTargetId !== 'manual-hide') {
+                const logicRow = document.createElement('div');
+                logicRow.className = "flex gap-1 mt-2"; // 加个 mt-2 增加间距
+                // ... 下面保持原有的 opSelect 等代码不变 ...
 
-            // 3. 【触发值】输入框
-            // ★ 只有在不是“不为空”模式下，才显示这个输入框
-            if (!isNoValueMode) {
-                const valueInput = document.createElement('input');
-                valueInput.type = "text";
-                valueInput.className = "flex-1 p-1 rounded bg-gray-900 border border-gray-700 text-xs text-blue-300";
-                valueInput.placeholder = "比较值...";
-                valueInput.value = el.bindTargetValue || "";
+                // 2. 【操作符】选择器
+                const opSelect = document.createElement('select');
 
-                valueInput.oninput = (e) => {
-                    el.bindTargetValue = e.target.value;
+                // 判断是否为不需要输入“值”的模式
+                const isNoValueMode = (el.bindTargetOperator === 'not-empty');
+
+                opSelect.className = isNoValueMode
+                    ? "w-full p-1 rounded bg-gray-900 border border-gray-700 text-xs"
+                    : "w-24 p-1 rounded bg-gray-900 border border-gray-700 text-xs"; // 稍微加宽一点以容纳长文本
+
+                // 定义所有可用的操作符
+                const options = [
+                    { v: '==', t: "等于" },
+                    { v: '!=', t: "不等于" },
+                    { v: '>', t: "大于 (>)" },
+                    { v: '<', t: "小于 (<)" },
+                    { v: '>=', t: "大于等于 (>=)" },
+                    { v: '<=', t: "小于等于 (<=)" },
+                    { v: 'not-empty', t: "不为空 (有字显)" }
+                ];
+
+                options.forEach(opt => {
+                    const o = document.createElement('option');
+                    o.value = opt.v;
+                    o.text = opt.t;
+                    if ((el.bindTargetOperator || '==') === opt.v) o.selected = true;
+                    opSelect.appendChild(o);
+                });
+
+                opSelect.onchange = (e) => {
+                    el.bindTargetOperator = e.target.value;
+                    // 改变操作符后立即刷新面板，决定是否显示/隐藏旁边的输入框
+                    this.updatePropEditor();
                     this.render();
                 };
-                logicRow.appendChild(valueInput);
-            }
+                logicRow.appendChild(opSelect);
 
-            conditionContainer.appendChild(logicRow);
+                // 3. 【触发值】输入框
+                // ★ 只有在不是“不为空”模式下，才显示这个输入框
+                if (!isNoValueMode) {
+                    const valueInput = document.createElement('input');
+                    valueInput.type = "text";
+                    valueInput.className = "flex-1 p-1 rounded bg-gray-900 border border-gray-700 text-xs text-blue-300";
+                    valueInput.placeholder = "比较值...";
+                    valueInput.value = el.bindTargetValue || "";
+
+                    valueInput.oninput = (e) => {
+                        el.bindTargetValue = e.target.value;
+                        this.render();
+                    };
+                    logicRow.appendChild(valueInput);
+                }
+
+                conditionContainer.appendChild(logicRow);
+            }
         }
         dynamic.appendChild(conditionContainer);
         // ==========================================
@@ -2280,7 +2309,15 @@ class CardForge {
 
         inputs.forEach(el => {
             const wrapper = document.createElement('div');
-            wrapper.className = "bg-gray-800 p-3 rounded border border-gray-700";
+            // ★ 新增：分配唯一 ID 并加上动画过渡效果
+            wrapper.id = `input-wrapper-${el.id}`;
+            wrapper.className = "bg-gray-800 p-3 rounded border border-gray-700 transition-all duration-300";
+
+            // ★ 新增：初始化时判断是否应该隐藏
+            const isVisible = this.checkVisibility(el);
+            if (el.alwaysShowInput === false && !isVisible) {
+                wrapper.classList.add('hidden');
+            }
 
             const label = document.createElement('label');
             label.className = "block text-xs font-bold text-gray-400 mb-2";
