@@ -70,8 +70,11 @@ class CardForge {
         this.normalizeAllDeckOrders();
 
         this.resizeCanvas();
+
+        // 保留左右分栏的拖拽
         this.setupPanelResizer();
-        this.setupPropResizer();
+
+        // 这样程序才能顺利执行到这里，绑定所有的点击事件
         this.setupEvents();
         this.render();
 
@@ -107,9 +110,8 @@ class CardForge {
             if (typeof this.storage.setRootPath === 'function') {
                 this.storage.setRootPath(ws.path);
             }
-            // 为了兼容之前的 Obsidian 同步功能，你可以直接把 ObsidianPath 指向仓库路径
-            // 这样当前仓库的卡牌就会直接导出为 MD 到该仓库下
-            this.obsidianPath = ws.path;
+            // ★ 核心修复：读取当前仓库专属的 Obsidian 路径，没有则置空，绝不覆盖
+            this.obsidianPath = ws.obsidianPath || null;
         }
     }
 
@@ -493,10 +495,16 @@ class CardForge {
             if (newMode !== 'card') this.returnToDeckMode = false;
         }
 
-        // 2. 切换面板显示/隐藏
+        // 2. 切换左侧面板显示/隐藏
         document.getElementById('panelTemplate').classList.toggle('hidden', newMode !== 'template');
         document.getElementById('panelCard').classList.toggle('hidden', newMode !== 'card');
         document.getElementById('panelDeckView').classList.toggle('hidden', newMode !== 'deck');
+
+        // ★ 核心修复：切换右侧面板和右侧拖拽条的显示/隐藏 ★
+        const rightPanel = document.getElementById('rightPanel');
+        const resizerRight = document.getElementById('uiResizerRight');
+        if (rightPanel) rightPanel.classList.toggle('hidden', newMode !== 'template');
+        if (resizerRight) resizerRight.classList.toggle('hidden', newMode !== 'template');
 
         // 3. 按钮状态切换
         document.getElementById('btnModeTemplate').classList.toggle('active', newMode === 'template');
@@ -507,19 +515,15 @@ class CardForge {
         document.getElementById('canvasWrapper').classList.toggle('hidden', newMode === 'deck');
         document.getElementById('deckGridWrapper').classList.toggle('hidden', newMode !== 'deck');
 
-        // --- ★ 核心修复：模式切换时的自动同步逻辑 ---
+        // 5. 模式切换时的自动同步逻辑
         if (newMode === 'template') {
             // 如果是从卡牌编辑模式切回来的，且当前有正在编辑的卡牌
             if (oldMode === 'card' && this.currentTemplateName) {
                 // 同步下拉菜单的选择
                 const selector = document.getElementById('designerTemplateSelector');
                 if (selector) selector.value = this.currentTemplateName;
-
                 // 确保模板设置 UI（名字、宽、高）与当前一致
                 this.updateTemplateSettingsUI();
-
-                // 如果你希望切换过去时保留撤回记录，可以在这里处理
-                // 但最重要的是刷新图层列表和属性面板
             }
             this.updateLayerList();
             this.updatePropEditor();
@@ -537,7 +541,6 @@ class CardForge {
         // 每次切换模式后，重绘一次画布
         this.render();
     }
-
 
 
     switchToDeckView() { this.setMode('deck'); }
@@ -1841,34 +1844,23 @@ class CardForge {
 
     }
 
-    // src/js/app.js - checkVisibility
+    // --- ★ 新增：单条逻辑计算助手 ---
+    evaluateCondition(cond) {
+        if (!cond.targetId) return true; // 如果还没选目标，默认放行
 
-    checkVisibility(el) {
-        if (this.selectedId === el.id) return true;
-
-        // ★ 核心修复：处理始终隐藏逻辑 ★
-        if (el.bindTargetId === 'manual-hide') return false;
-
-        // 2. 无绑定目标则显示
-        if (!el.bindTargetId) return true;
-
-        // 3. 获取目标文字数据
         let targetText = '';
-        const targetEl = this.template.find(e => e.id === el.bindTargetId);
+        const targetEl = this.template.find(e => e.id === cond.targetId);
         if (targetEl && this.cardData[targetEl.label]) {
             targetText = this.cardData[targetEl.label].text;
         }
 
         const currentVal = String(targetText || '').trim();
-        const triggerVal = String(el.bindTargetValue || '').trim();
-        const operator = el.bindTargetOperator || '==';
-
-        // 4. 后续的数值/字符串比较逻辑保持不变 ...
+        const triggerVal = String(cond.value || '').trim();
         const currentNum = parseFloat(currentVal);
         const triggerNum = parseFloat(triggerVal);
         const isNumeric = !isNaN(currentNum) && !isNaN(triggerNum);
 
-        switch (operator) {
+        switch (cond.operator) {
             case 'not-empty': return currentVal !== '';
             case '!=': return currentVal !== triggerVal;
             case '>': return isNumeric ? currentNum > triggerNum : false;
@@ -1877,6 +1869,45 @@ class CardForge {
             case '<=': return isNumeric ? currentNum <= triggerNum : false;
             default: return currentVal === triggerVal; // 默认 '=='
         }
+    }
+
+    checkVisibility(el) {
+        // 1. 上帝视角：正在选中的图层必须可见
+        if (this.selectedId === el.id) return true;
+
+        // 2. 兼容并处理“始终隐藏”
+        if (el.bindTargetId === 'manual-hide' || el.manualHide) return false;
+
+        // 3. 数据无缝迁移 (旧的单一条件转为数组)
+        if (!el.conditions) {
+            el.conditions = [];
+            if (el.bindTargetId && el.bindTargetId !== 'manual-hide') {
+                el.conditions.push({
+                    targetId: el.bindTargetId,
+                    operator: el.bindTargetOperator || '==',
+                    value: el.bindTargetValue || '',
+                    logic: 'AND' // 默认第一个是 AND，虽然不起作用
+                });
+            }
+        }
+
+        // 4. 无条件则默认显示
+        if (el.conditions.length === 0) return true;
+
+        // 5. ★ 核心计算：从左到右链式计算多条件结果 ★
+        let result = this.evaluateCondition(el.conditions[0]);
+        for (let i = 1; i < el.conditions.length; i++) {
+            const cond = el.conditions[i];
+            const res = this.evaluateCondition(cond);
+            if (cond.logic === 'OR') {
+                result = result || res;
+            } else {
+                // 默认为 AND
+                result = result && res;
+            }
+        }
+
+        return result;
     }
 
 
@@ -2050,35 +2081,26 @@ class CardForge {
 
 
     updateUI() {
-
         document.getElementById('panelTemplate').classList.toggle('hidden', this.mode !== 'template');
-
         document.getElementById('panelCard').classList.toggle('hidden', this.mode !== 'card');
-
         document.getElementById('panelDeckView').classList.toggle('hidden', this.mode !== 'deck');
 
-
-
         document.getElementById('btnModeTemplate').classList.toggle('active', this.mode === 'template');
-
         document.getElementById('btnModeCard').classList.toggle('active', this.mode === 'card');
-
         document.getElementById('btnModeDeck').classList.toggle('active', this.mode === 'deck');
 
-
+        // ★ 核心：右侧栏只在模板模式显示
+        const rightPanel = document.getElementById('rightPanel');
+        const resizerRight = document.getElementById('uiResizerRight');
+        if (rightPanel) rightPanel.classList.toggle('hidden', this.mode !== 'template');
+        if (resizerRight) resizerRight.classList.toggle('hidden', this.mode !== 'template');
 
         if (this.mode === 'template') {
-
             this.updateLayerList();
-
             this.updatePropEditor();
-
         } else if (this.mode === 'card') {
-
             this.updateCardInputs();
-
         }
-
     }
 
 
@@ -2124,259 +2146,223 @@ class CardForge {
     }
 
 
-
     updatePropEditor() {
-
         const container = document.getElementById('propEditor');
-
+        const emptyState = document.getElementById('emptyPropState');
         const dynamic = document.getElementById('dynamicProps');
 
-        dynamic.innerHTML = '';
+        if (dynamic) dynamic.innerHTML = '';
 
-        if (!this.selectedId) { container.classList.add('hidden'); return; }
+        // 1. 如果没有选中任何图层，显示空状态提示并退出
+        if (!this.selectedId) {
+            if (container) { container.classList.add('hidden'); container.classList.remove('flex'); }
+            if (emptyState) emptyState.classList.remove('hidden');
+            return;
+        }
 
-        container.classList.remove('hidden');
-
+        // 2. ★ 核心修复：找回丢失的图层数据寻址！★
         const el = this.template.find(e => e.id === this.selectedId);
+        if (!el) return;
 
+        // 3. 选中图层后，显示面板并隐藏提示
+        if (container) { container.classList.remove('hidden'); container.classList.add('flex'); }
+        if (emptyState) emptyState.classList.add('hidden');
+
+        // ==== 基础坐标属性 ====
         this.bindInput('propLabel', el.label, v => el.label = v);
-
         this.bindInput('propX', el.x, v => el.x = parseInt(v));
-
         this.bindInput('propY', el.y, v => el.y = parseInt(v));
-
         this.bindInput('propW', el.w, v => el.w = parseInt(v));
-
         this.bindInput('propH', el.h, v => el.h = parseInt(v));
 
         // ==========================================
-        // ★★★ 修改后：条件显示设置区域 (支持不等于) ★★★
+        // ★★★ 升级版：多条件显示设置区域 ★★★
         // ==========================================
-
-        // 条件显示设置区域
         const conditionContainer = document.createElement('div');
         conditionContainer.className = "mt-4 pt-2 border-t border-gray-700/50 space-y-2";
-        conditionContainer.innerHTML = `<label class="block text-xs font-bold text-blue-400"><i class="fa-solid fa-eye mr-1"></i>显示条件</label>`;
 
-        const targetSelect = document.createElement('select');
-        targetSelect.className = "w-full p-1 rounded bg-gray-900 border border-gray-700 text-xs mb-1";
+        // 标题栏 + 添加按钮
+        conditionContainer.innerHTML = `
+            <div class="flex justify-between items-center mb-1">
+                <label class="block text-xs font-bold text-blue-400"><i class="fa-solid fa-eye mr-1"></i>显示条件</label>
+                <button id="btnAddCondition" class="text-[10px] bg-blue-700 hover:bg-blue-600 text-white px-2 py-0.5 rounded transition-colors shadow-sm active:scale-95">
+                    <i class="fa-solid fa-plus mr-1"></i>加条件
+                </button>
+            </div>
+        `;
 
-        // 选项：始终显示
-        const optAlways = document.createElement('option');
-        optAlways.value = ""; optAlways.text = "始终显示 (无条件)";
-        targetSelect.appendChild(optAlways);
-
-        // ★ 新增选项：始终不显示
-        const optNever = document.createElement('option');
-        optNever.value = "manual-hide"; optNever.text = "始终隐藏 (不渲染)";
-        if (el.bindTargetId === "manual-hide") optNever.selected = true;
-        targetSelect.appendChild(optNever);
-
-        // 选项：绑定其他图层
-        this.template.forEach(t => {
-            if (t.type === 'text' && t.id !== el.id) {
-                const opt = document.createElement('option');
-                opt.value = t.id; opt.text = `当 [${t.label}]`;
-                if (t.id === el.bindTargetId) opt.selected = true;
-                targetSelect.appendChild(opt);
+        // 数据迁移确保结构安全
+        if (!el.conditions) {
+            el.conditions = [];
+            if (el.bindTargetId && el.bindTargetId !== 'manual-hide') {
+                el.conditions.push({ targetId: el.bindTargetId, operator: el.bindTargetOperator || '==', value: el.bindTargetValue || '', logic: 'AND' });
             }
+        }
+
+        // 特殊开关：始终隐藏
+        const isManualHide = el.bindTargetId === 'manual-hide' || el.manualHide;
+        this.createCheckboxProp(conditionContainer, '始终隐藏 (不渲染)', isManualHide, v => {
+            el.manualHide = v;
+            if (v) el.bindTargetId = 'manual-hide';
+            else if (el.bindTargetId === 'manual-hide') el.bindTargetId = null;
+            this.updatePropEditor();
+            this.render();
         });
 
-        targetSelect.onchange = (e) => {
-            el.bindTargetId = e.target.value;
-            this.updatePropEditor(); // 刷新以展示/隐藏后续逻辑行
-            this.render();
-        };
-        conditionContainer.appendChild(targetSelect);
+        // 只有在非“始终隐藏”状态下，才显示条件列表
+        if (!isManualHide && el.bindTargetId !== 'manual-hide') {
 
-        // ★ 只有选择了目标，才显示后面的逻辑设置
-        if (el.bindTargetId) {
-            // 1. 新增：是否在面板中始终显示的开关
-            // 兼容旧数据，如果是 undefined 则默认为 true
+            // 特殊开关：不满足时是否保留左侧编辑面板
             const isAlwaysShow = el.alwaysShowInput !== false;
-            this.createCheckboxProp(conditionContainer, '条件不满足时，仍显示编辑栏', isAlwaysShow, v => {
+            this.createCheckboxProp(conditionContainer, '隐藏图层时，保留左侧输入框', isAlwaysShow, v => {
                 el.alwaysShowInput = v;
+                this.render();
             });
 
-            // 2. 原有的逻辑操作符选项（手动隐藏模式不需要这些操作符）
-            if (el.bindTargetId !== 'manual-hide') {
-                const logicRow = document.createElement('div');
-                logicRow.className = "flex gap-1 mt-2"; // 加个 mt-2 增加间距
-                // ... 下面保持原有的 opSelect 等代码不变 ...
+            // 渲染条件列表
+            const listDiv = document.createElement('div');
+            listDiv.className = "space-y-1.5 mt-2";
 
-                // 2. 【操作符】选择器
-                const opSelect = document.createElement('select');
+            if (el.conditions.length === 0) {
+                listDiv.innerHTML = `<div class="text-center text-[10px] text-gray-500 py-3 border border-dashed border-gray-700 rounded bg-black/20">无条件限制，始终显示</div>`;
+            }
 
-                // 判断是否为不需要输入“值”的模式
-                const isNoValueMode = (el.bindTargetOperator === 'not-empty');
+            el.conditions.forEach((cond, index) => {
+                const row = document.createElement('div');
+                row.className = "flex flex-wrap gap-1 items-center p-1.5 bg-gray-900 border border-gray-700 rounded relative group";
 
-                opSelect.className = isNoValueMode
-                    ? "w-full p-1 rounded bg-gray-900 border border-gray-700 text-xs"
-                    : "w-24 p-1 rounded bg-gray-900 border border-gray-700 text-xs"; // 稍微加宽一点以容纳长文本
-
-                // 定义所有可用的操作符
-                const options = [
-                    { v: '==', t: "等于" },
-                    { v: '!=', t: "不等于" },
-                    { v: '>', t: "大于 (>)" },
-                    { v: '<', t: "小于 (<)" },
-                    { v: '>=', t: "大于等于 (>=)" },
-                    { v: '<=', t: "小于等于 (<=)" },
-                    { v: 'not-empty', t: "不为空 (有字显)" }
-                ];
-
-                options.forEach(opt => {
-                    const o = document.createElement('option');
-                    o.value = opt.v;
-                    o.text = opt.t;
-                    if ((el.bindTargetOperator || '==') === opt.v) o.selected = true;
-                    opSelect.appendChild(o);
-                });
-
-                opSelect.onchange = (e) => {
-                    el.bindTargetOperator = e.target.value;
-                    // 改变操作符后立即刷新面板，决定是否显示/隐藏旁边的输入框
+                const delBtn = document.createElement('button');
+                delBtn.className = "absolute -top-1.5 -right-1.5 opacity-0 group-hover:opacity-100 text-red-500 bg-black rounded-full w-4 h-4 flex items-center justify-center border border-gray-700 hover:bg-red-500 hover:text-white transition-all text-[8px] z-10";
+                delBtn.innerHTML = '<i class="fa-solid fa-xmark"></i>';
+                delBtn.onclick = () => {
+                    el.conditions.splice(index, 1);
                     this.updatePropEditor();
                     this.render();
                 };
-                logicRow.appendChild(opSelect);
+                row.appendChild(delBtn);
 
-                // 3. 【触发值】输入框
-                // ★ 只有在不是“不为空”模式下，才显示这个输入框
-                if (!isNoValueMode) {
-                    const valueInput = document.createElement('input');
-                    valueInput.type = "text";
-                    valueInput.className = "flex-1 p-1 rounded bg-gray-900 border border-gray-700 text-xs text-blue-300";
-                    valueInput.placeholder = "比较值...";
-                    valueInput.value = el.bindTargetValue || "";
-
-                    valueInput.oninput = (e) => {
-                        el.bindTargetValue = e.target.value;
-                        this.render();
-                    };
-                    logicRow.appendChild(valueInput);
+                if (index > 0) {
+                    const logicSel = document.createElement('select');
+                    logicSel.className = "p-1 rounded bg-gray-800 border border-gray-600 text-[10px] text-yellow-500 font-bold focus:outline-none";
+                    ['AND', 'OR'].forEach(lg => {
+                        const o = document.createElement('option'); o.value = lg; o.text = lg === 'AND' ? '且' : '或';
+                        if (cond.logic === lg) o.selected = true;
+                        logicSel.appendChild(o);
+                    });
+                    logicSel.onchange = (e) => { cond.logic = e.target.value; this.render(); };
+                    row.appendChild(logicSel);
                 }
 
-                conditionContainer.appendChild(logicRow);
-            }
+                const targetSel = document.createElement('select');
+                targetSel.className = "flex-1 min-w-[70px] p-1 rounded bg-gray-800 border border-gray-700 text-[10px] text-gray-300 focus:outline-none focus:border-blue-500";
+                targetSel.innerHTML = '<option value="">选择目标...</option>';
+                this.template.forEach(t => {
+                    if (t.type === 'text' && t.id !== el.id) {
+                        const o = document.createElement('option');
+                        o.value = t.id; o.text = `[${t.label}]`;
+                        if (t.id === cond.targetId) o.selected = true;
+                        targetSel.appendChild(o);
+                    }
+                });
+                targetSel.onchange = (e) => { cond.targetId = e.target.value; this.render(); };
+                row.appendChild(targetSel);
+
+                const opSel = document.createElement('select');
+                opSel.className = "w-14 p-1 rounded bg-gray-800 border border-gray-700 text-[10px] text-gray-300 focus:outline-none focus:border-blue-500";
+                const ops = [{ v: '==', t: "=" }, { v: '!=', t: "≠" }, { v: '>', t: ">" }, { v: '<', t: "<" }, { v: '>=', t: "≥" }, { v: '<=', t: "≤" }, { v: 'not-empty', t: "有字" }];
+                ops.forEach(opt => {
+                    const o = document.createElement('option'); o.value = opt.v; o.text = opt.t;
+                    if (cond.operator === opt.v) o.selected = true;
+                    opSel.appendChild(o);
+                });
+                opSel.onchange = (e) => {
+                    cond.operator = e.target.value;
+                    this.updatePropEditor();
+                    this.render();
+                };
+                row.appendChild(opSel);
+
+                if (cond.operator !== 'not-empty') {
+                    const valInput = document.createElement('input');
+                    valInput.type = "text";
+                    valInput.className = "w-16 flex-1 p-1 rounded bg-gray-800 border border-gray-700 text-[10px] text-blue-300 focus:outline-none focus:border-blue-500 placeholder-gray-600";
+                    valInput.placeholder = "值...";
+                    valInput.value = cond.value || "";
+                    valInput.oninput = (e) => { cond.value = e.target.value; this.render(); };
+                    row.appendChild(valInput);
+                }
+
+                listDiv.appendChild(row);
+            });
+            conditionContainer.appendChild(listDiv);
+
+            conditionContainer.querySelector('#btnAddCondition').onclick = () => {
+                el.conditions.push({ targetId: '', operator: '==', value: '', logic: el.conditions.length > 0 ? 'AND' : 'AND' });
+                this.updatePropEditor();
+                this.render();
+            };
         }
+
         dynamic.appendChild(conditionContainer);
         // ==========================================
-
-        // ==========================================
-        // ★★★ 新增结束 ★★★
+        // ★★★ 条件设置结束 ★★★
         // ==========================================
 
-        // --- 步骤2修改：模板底图上传 ---
+        // ==== 静态图属性 ====
         if (el.type === 'static-image') {
             this.createFileProp(dynamic, '上传底图', async file => {
-                const result = await this.storage.handleImageUpload(file); // 使用新方法
+                const result = await this.storage.handleImageUpload(file);
                 if (!result) return;
-
                 const src = (result instanceof Promise) ? await result : result;
-                el.imagePath = src; // 存路径
-                el._srcData = null; // 清空 Base64
-
+                el.imagePath = src;
+                el._srcData = null;
                 const img = new Image();
                 img.onload = () => { el.src = img; this.render(); };
                 img.src = this.storage.getImgSource(src);
             });
         }
 
-        // ... inside updatePropEditor ...
-
+        // ==== 文本属性 ====
         else if (el.type === 'text') {
-
-            // --- 新增：默认文本输入框 (放在最上面) ---
-
             const textContainer = document.createElement('div');
-
             textContainer.className = "mb-2 pb-2 border-b border-gray-700/50";
-
             textContainer.innerHTML = `<label class="block text-gray-500 mb-1">默认显示文本</label>`;
 
-
-
-            // 根据是否多行，创建 input 或 textarea
-
             const textInput = document.createElement(el.multiline ? 'textarea' : 'input');
-
             if (!el.multiline) textInput.type = "text";
-
             else textInput.rows = 3;
 
-
-
             textInput.className = "w-full p-1.5 rounded bg-gray-900 border border-gray-700 text-gray-200 focus:border-blue-500 transition-colors";
-
             textInput.value = el.defaultText || '';
-
             textInput.placeholder = "在此输入模板上的默认文字...";
-
-
-
-            // 绑定事件：输入时实时刷新画布
-
             textInput.oninput = (e) => {
-
                 el.defaultText = e.target.value;
-
                 this.render();
-
             };
-
-
-
             textContainer.appendChild(textInput);
-
             dynamic.appendChild(textContainer);
 
-            // ---------------------------------------
-
-
-
             this.createColorProp(dynamic, '颜色', el.color, v => el.color = v);
-
             this.createNumberProp(dynamic, '字号', el.fontSize, v => el.fontSize = parseInt(v));
 
-
-
             const fonts = ['Noto Sans SC', 'Noto Serif SC', 'Arial', 'Times New Roman', 'Courier New', 'SimSun', 'SimHei', 'Microsoft YaHei', 'KaiTi', 'FangSong'];
-
             this.createSelectProp(dynamic, '字体', el.fontFamily, fonts, v => el.fontFamily = v);
-
             this.createSelectProp(dynamic, '粗细', el.fontWeight || 'normal', ['normal', 'bold'], v => el.fontWeight = v);
-
             this.createSelectProp(dynamic, '样式', el.fontStyle || 'normal', ['normal', 'italic'], v => el.fontStyle = v);
-
             this.createSelectProp(dynamic, '对齐', el.align, ['left', 'center', 'right'], v => el.align = v);
 
-
-
-            // 移除旧的 createInputProp 调用，因为上面已经加了更高级的输入框
-
-            // this.createInputProp(dynamic, '默认文本', ...); <--- 这行删掉
-
-
-
             this.createCheckboxProp(dynamic, '多行文本', el.multiline, v => {
-
                 el.multiline = v;
-
-                this.updatePropEditor(); // 重新渲染属性面板以切换 input/textarea
-
+                this.updatePropEditor();
                 this.render();
-
             });
 
-            // 在 updatePropEditor 内部 el.type === 'text' 分支末尾
             this.createCheckboxProp(dynamic, '固定选项', el.isOptions, v => {
                 el.isOptions = v;
-                this.updatePropEditor(); // 刷新面板以显示/隐藏选项输入框
+                this.updatePropEditor();
                 this.render();
             });
 
-            // 如果开启了固定选项，显示选项内容输入框
             if (el.isOptions) {
                 const optContainer = document.createElement('div');
                 optContainer.className = "mt-1 p-2 bg-black/20 rounded border border-gray-700";
@@ -2390,22 +2376,17 @@ class CardForge {
 
                 optInput.oninput = (e) => {
                     el.optionsList = e.target.value;
-                    // 如果卡牌数据还没选值，默认给它第一个选项
                     const firstOpt = el.optionsList.split(/[,，]/)[0].trim();
                     if (this.cardData[el.label] && !this.cardData[el.label].text) {
                         this.cardData[el.label].text = firstOpt;
                     }
                     this.render();
                 };
-
                 optContainer.appendChild(optInput);
                 dynamic.appendChild(optContainer);
             }
-
         }
-
     }
-
 
 
     updateCardInputs() {
@@ -2579,100 +2560,61 @@ class CardForge {
 
 
     setupPanelResizer() {
-        const resizer = document.getElementById('uiResizer');
-        const leftPanel = document.getElementById('leftPanel');
         const workspace = document.getElementById('workspaceContainer');
 
-        resizer.addEventListener('mousedown', (e) => {
-            this.isPanelResizing = true;
-            // 增加全局样式防止拖动时鼠标指针闪烁
-            document.body.style.cursor = 'col-resize';
-            document.body.style.userSelect = 'none';
-            // 暂时禁用右侧交互，防止鼠标划入 Canvas 导致事件丢失
-            workspace.style.pointerEvents = 'none';
-        });
+        // --- 左侧大纲栏拖拽 ---
+        const resizerLeft = document.getElementById('uiResizer');
+        const leftPanel = document.getElementById('leftPanel');
+        if (resizerLeft && leftPanel) {
+            let isResizingLeft = false;
+            resizerLeft.addEventListener('mousedown', () => {
+                isResizingLeft = true;
+                document.body.style.cursor = 'col-resize';
+                workspace.style.pointerEvents = 'none';
+            });
+            window.addEventListener('mousemove', (e) => {
+                if (!isResizingLeft) return;
+                let newWidth = e.clientX;
+                if (newWidth < 200) newWidth = 200;
+                if (newWidth > 600) newWidth = 600;
+                leftPanel.style.width = `${newWidth}px`;
+            });
+            window.addEventListener('mouseup', () => {
+                if (isResizingLeft) {
+                    isResizingLeft = false;
+                    document.body.style.cursor = 'default';
+                    workspace.style.pointerEvents = 'auto';
+                }
+            });
+        }
 
-        window.addEventListener('mousemove', (e) => {
-            if (!this.isPanelResizing) return;
-
-            // 获取鼠标当前的水平位置作为新宽度
-            let newWidth = e.clientX;
-
-            // 限制宽度范围
-            const minW = 250;
-            const maxW = 600;
-            if (newWidth < minW) newWidth = minW;
-            if (newWidth > maxW) newWidth = maxW;
-
-            leftPanel.style.width = `${newWidth}px`;
-
-            // 可选：如果分栏变动很大，可以重新计算画布居中
-            // this.render(); 
-        });
-
-        window.addEventListener('mouseup', () => {
-            if (this.isPanelResizing) {
-                this.isPanelResizing = false;
-                document.body.style.cursor = 'default';
-                document.body.style.userSelect = 'auto';
-                workspace.style.pointerEvents = 'auto'; // 恢复交互
-            }
-        });
+        // --- 右侧属性栏拖拽 ---
+        const resizerRight = document.getElementById('uiResizerRight');
+        const rightPanel = document.getElementById('rightPanel');
+        if (resizerRight && rightPanel) {
+            let isResizingRight = false;
+            resizerRight.addEventListener('mousedown', () => {
+                isResizingRight = true;
+                document.body.style.cursor = 'col-resize';
+                workspace.style.pointerEvents = 'none';
+            });
+            window.addEventListener('mousemove', (e) => {
+                if (!isResizingRight) return;
+                let newWidth = window.innerWidth - e.clientX;
+                if (newWidth < 240) newWidth = 240;
+                if (newWidth > 600) newWidth = 600;
+                rightPanel.style.width = `${newWidth}px`;
+            });
+            window.addEventListener('mouseup', () => {
+                if (isResizingRight) {
+                    isResizingRight = false;
+                    document.body.style.cursor = 'default';
+                    workspace.style.pointerEvents = 'auto';
+                }
+            });
+        }
     }
 
-    /**
- * 初始化模板编辑中“图层列表”与“属性编辑器”之间的上下拖拽功能
- */
-    setupPropResizer() {
-        const resizerV = document.getElementById('uiResizerV');
-        const propEditor = document.getElementById('propEditor');
-        const panelTemplate = document.getElementById('panelTemplate');
-
-        // 1. 鼠标按下
-        resizerV.addEventListener('mousedown', (e) => {
-            this.isPropResizing = true;
-
-            // 视觉反馈
-            document.body.style.cursor = 'row-resize';
-            document.body.style.userSelect = 'none';
-            resizerV.classList.add('bg-blue-500');
-        });
-
-        // 2. 全局鼠标移动
-        window.addEventListener('mousemove', (e) => {
-            if (!this.isPropResizing) return;
-
-            // 获取 panelTemplate 的底部 Y 坐标（因为 propEditor 是贴底部的）
-            const panelRect = panelTemplate.getBoundingClientRect();
-            const panelBottom = panelRect.bottom;
-
-            // 计算鼠标距离底部的距离，这就是 propEditor 的新高度
-            let newHeight = panelBottom - e.clientY;
-
-            // 设置安全边界（最小100px，最大高度不能超过整个面板的80%）
-            const minH = 100;
-            const maxH = panelRect.height * 0.8;
-
-            if (newHeight < minH) newHeight = minH;
-            if (newHeight > maxH) newHeight = maxH;
-
-            // 应用高度
-            propEditor.style.height = `${newHeight}px`;
-        });
-
-        // 3. 全局鼠标松开
-        window.addEventListener('mouseup', () => {
-            if (this.isPropResizing) {
-                this.isPropResizing = false;
-
-                // 恢复状态
-                document.body.style.cursor = 'default';
-                document.body.style.userSelect = 'auto';
-                resizerV.classList.remove('bg-blue-500');
-            }
-        });
-    }
-    // --- 交互事件 (增强拖拽调整大小) ---
 
     setupEvents() {
         const layer = this.interactionLayer;
@@ -2860,7 +2802,8 @@ class CardForge {
         for (const el of elements) {
             if (el.type === 'static-image' && el.imagePath) {
                 try {
-                    const fullPath = path.join(process.cwd(), el.imagePath);
+                    // ★ 核心修复：使用 this.storage.basePath
+                    const fullPath = path.join(this.storage.basePath, el.imagePath);
                     if (fs.existsSync(fullPath)) {
                         assets[path.basename(el.imagePath)] = fs.readFileSync(fullPath).toString('base64');
                     }
@@ -2897,7 +2840,9 @@ class CardForge {
                 // 1. 将 Base64 图片还原到 saved_data/images 目录
                 for (const [fileName, b64Data] of Object.entries(assets)) {
                     const relativePath = `saved_data/images/${fileName}`;
-                    const fullSavePath = path.join(process.cwd(), relativePath);
+
+                    // ★ 核心修复：使用 this.storage.basePath 将包里的图片解压到当前仓库
+                    const fullSavePath = path.join(this.storage.basePath, relativePath);
                     if (!fs.existsSync(fullSavePath)) {
                         fs.writeFileSync(fullSavePath, Buffer.from(b64Data, 'base64'));
                     }
@@ -3131,14 +3076,19 @@ class CardForge {
     bindObsidianFolder() {
         const chooser = document.createElement('input');
         chooser.type = 'file';
-        chooser.setAttribute('nwdirectory', ''); // NW.js 特有：选择文件夹
+        chooser.setAttribute('nwdirectory', ''); // 唤起文件夹选择
 
         chooser.onchange = (e) => {
             const path = e.target.files[0].path;
             this.obsidianPath = path;
-            // 持久化保存
-            this.storage.saveConfig({ obsidianPath: path });
-            alert(`已成功绑定目录：\n${path}`);
+
+            // ★ 核心修复：将绑定的 Obsidian 路径存入当前选中的仓库配置中
+            const ws = this.workspaces.find(w => w.id === this.currentWorkspace);
+            if (ws) {
+                ws.obsidianPath = path;
+                this.storage.saveConfig({ workspaces: this.workspaces, currentWorkspace: this.currentWorkspace });
+            }
+            alert(`当前仓库已成功绑定 Obsidian 目录：\n${path}`);
         };
         chooser.click();
     }
@@ -3262,7 +3212,6 @@ class CardForge {
                         mdContent += `#### # ${card.name}\n`;
 
                         // --- ★ 核心改进：动态扫描所有图片层 ★ ---
-                        // 遍历 card.data 中的每一个槽位，只要发现 imagePath 就执行迁移
                         for (const label in card.data) {
                             const slot = card.data[label];
 
@@ -3270,18 +3219,16 @@ class CardForge {
                                 const originalPath = slot.imagePath;
                                 const fileName = path.basename(originalPath);
 
-                                // 构造源文件完整路径 (处理相对路径)
+                                // ★ 核心修复：使用 this.storage.basePath 替代 process.cwd()
                                 const sourceFullPath = path.isAbsolute(originalPath)
                                     ? originalPath
-                                    : path.join(process.cwd(), originalPath);
+                                    : path.join(this.storage.basePath, originalPath);
 
                                 const targetFullPath = path.join(obsAttachmentsDir, fileName);
 
                                 try {
                                     // 如果图片存在且附件库里还没有，就执行“物理搬家”
                                     if (fs.existsSync(sourceFullPath)) {
-                                        // 注意：这里去掉了 !fs.existsSync(targetFullPath) 的判断
-                                        // 这样如果图片内容变了但文件名没变，也能强制覆盖更新
                                         fs.copyFileSync(sourceFullPath, targetFullPath);
                                         console.log(`[Sync] 图片已同步至 Obsidian: ${fileName}`);
                                     }
