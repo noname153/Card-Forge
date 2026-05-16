@@ -2970,6 +2970,23 @@ class CardForge {
                 let blockContent = [];
                 let isJustStartedBlock = false;
 
+                // === ★ 核心新增：用于“挂起”刚刚读到的图片 ===
+                let pendingImage = null;
+
+                // 辅助函数：防呆设计。如果图片后面紧跟的不是位置，而是别的字，强制把挂起的图片存入默认图层
+                const flushPendingImage = () => {
+                    if (pendingImage) {
+                        const tplDef = this.templateLibrary[templateName];
+                        const elements = tplDef ? (Array.isArray(tplDef) ? tplDef : tplDef.elements) : [];
+                        const imgLayer = elements.find(e => e.type === 'user-image');
+                        const defaultLabel = imgLayer ? imgLayer.label : '卡图区域';
+
+                        if (!card.data[defaultLabel]) card.data[defaultLabel] = { imagePath: pendingImage, scale: 1, x: 0, y: 0 };
+                        else card.data[defaultLabel].imagePath = pendingImage;
+                        pendingImage = null;
+                    }
+                };
+
                 for (let i = 1; i < bLines.length; i++) {
                     const rawLine = bLines[i];
                     const trimmedLine = rawLine.trim();
@@ -2980,92 +2997,119 @@ class CardForge {
                             const lastPart = rawLine.split('}')[0];
                             if (lastPart.trim()) blockContent.push(lastPart);
                             card.data[currentBlockKey] = { text: blockContent.join('\n') };
-                            // 状态重置
                             currentBlockKey = null;
                             blockContent = [];
                             isJustStartedBlock = false;
                         } else {
-                            // 拦截紧跟在 { 后的第一个换行
                             if (isJustStartedBlock && trimmedLine === "") {
                                 isJustStartedBlock = false;
                                 continue;
                             }
                             isJustStartedBlock = false;
-                            blockContent.push(rawLine); // 保留缩进
+                            blockContent.push(rawLine);
                         }
                         continue;
                     }
 
                     if (!trimmedLine) continue;
 
-                    // 2. 图片匹配与智能路径探测
+                    // 2. 图片匹配 (Markdown 语法)
                     const stdImgMatch = trimmedLine.match(/!\[\]\((.+?)\)/);
                     const obsidianImgMatch = trimmedLine.match(/!\[\[(.+?)(?:\|.*)?\]\]/);
 
                     if (stdImgMatch || obsidianImgMatch) {
+                        flushPendingImage(); // 如果上一个图片还没消化，先消化掉
+
                         let imgPath = "";
                         if (stdImgMatch) {
                             imgPath = stdImgMatch[1];
                         } else {
                             const capturedPath = obsidianImgMatch[1];
-                            // 探测逻辑：
-                            // pathA: 原始链接路径 (可能已包含 attachments/)
                             let pathA = path.join(baseDir, capturedPath);
-                            // pathB: 尝试补上 attachments/ 前缀
                             let pathB = path.join(baseDir, "attachments", capturedPath);
-                            // pathC: 即使链接里有路径，也强制去 attachments 根目录找文件名
                             let pathC = path.join(baseDir, "attachments", path.basename(capturedPath));
 
                             if (fs.existsSync(pathA)) imgPath = pathA;
                             else if (fs.existsSync(pathB)) imgPath = pathB;
                             else if (fs.existsSync(pathC)) imgPath = pathC;
-                            else imgPath = pathA; // 找不到则保留原始拼接
+                            else imgPath = pathA;
                         }
 
-                        // 采用增量更新，默认缩放为 1 (100% 铺满)
-                        if (!card.data['卡图区域']) {
-                            card.data['卡图区域'] = { imagePath: imgPath, scale: 1, x: 0, y: 0 };
-                        } else {
-                            card.data['卡图区域'].imagePath = imgPath;
+                        let finalRelativePath = imgPath;
+                        if (imgPath && fs.existsSync(imgPath)) {
+                            const fileName = path.basename(imgPath);
+                            const localRelativePath = `saved_data/images/${fileName}`;
+                            const localAbsolutePath = path.join(this.storage.basePath, localRelativePath);
+
+                            if (!fs.existsSync(localAbsolutePath)) {
+                                try {
+                                    const imgDir = path.dirname(localAbsolutePath);
+                                    if (!fs.existsSync(imgDir)) fs.mkdirSync(imgDir, { recursive: true });
+                                    fs.copyFileSync(imgPath, localAbsolutePath);
+                                } catch (e) { console.error(e); }
+                            }
+                            finalRelativePath = localRelativePath;
                         }
+
+                        // === ★ 核心逻辑：不急着存，将图片路径挂起 ===
+                        pendingImage = finalRelativePath;
                         continue;
                     }
 
                     // 3. 检查块模式开始 (例如 效果：{ )
                     const blockStartMatch = trimmedLine.match(/^(.+?)：\s*\{/);
                     if (blockStartMatch) {
+                        flushPendingImage(); // 遇到文本块，立刻清空挂起的图片
                         currentBlockKey = blockStartMatch[1];
                         isJustStartedBlock = true;
                         continue;
                     }
 
-                    // 4. 常规单行属性与卡图位置解析
+                    // 4. 常规单行属性与位置解析
                     const attrMatch = trimmedLine.match(/^(.+?)：(.*)$/);
                     if (attrMatch) {
                         const key = attrMatch[1];
                         const val = attrMatch[2];
 
-                        if (key === '卡图位置') {
-                            // 解析格式: "缩放 X Y" (例如: 100 66 11)
+                        // === ★ 见证奇迹的时刻：利用上下行规律合并解析 ===
+                        if (pendingImage && key.endsWith('位置')) {
+                            // 从 "卡图区域位置" 中反向提取出真实的图层名："卡图区域"
+                            const layerName = key.replace(/位置$/, '');
+
                             const parts = val.trim().split(/\s+/);
                             const s = parseFloat(parts[0]) / 100 || 1.0;
                             const x = parseFloat(parts[1]) || 0;
                             const y = parseFloat(parts[2]) || 0;
 
-                            if (!card.data['卡图区域']) {
-                                card.data['卡图区域'] = { imagePath: "", scale: s, x: x, y: y };
-                            } else {
-                                card.data['卡图区域'].scale = s;
-                                card.data['卡图区域'].x = x;
-                                card.data['卡图区域'].y = y;
-                            }
+                            // 将上一行挂起的图片，和这一行的位置、名字，完美缝合到一起！
+                            card.data[layerName] = { imagePath: pendingImage, scale: s, x: x, y: y };
+
+                            pendingImage = null; // 消化完毕，置空
+                            continue;
+                        }
+
+                        flushPendingImage(); // 没命中联动逻辑，安全释放
+
+                        // 兜底逻辑：处理用户可能在 MD 里删了图片，但留下了位置文本的情况
+                        if (key.endsWith('位置')) {
+                            const layerName = key.replace(/位置$/, '');
+                            const parts = val.trim().split(/\s+/);
+                            const s = parseFloat(parts[0]) / 100 || 1.0;
+                            const x = parseFloat(parts[1]) || 0;
+                            const y = parseFloat(parts[2]) || 0;
+
+                            if (!card.data[layerName]) card.data[layerName] = { imagePath: "", scale: s, x: x, y: y };
+                            else { card.data[layerName].scale = s; card.data[layerName].x = x; card.data[layerName].y = y; }
                         } else {
-                            // 普通属性（使用 label 作为 key）
+                            // 普通文本属性
                             card.data[key] = { text: val };
                         }
                         continue;
                     }
+
+                    flushPendingImage(); // 杂项行，安全释放
                 }
+                flushPendingImage(); // 整个卡牌循环结束前，最后清空一次
                 // 将解析完成的卡牌存入结果对象
                 cardsObj[name] = card;
             });
